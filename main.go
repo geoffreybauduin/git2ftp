@@ -74,7 +74,11 @@ func main() {
 	git2ftpFile := path.Join(*app.RemoteDirectory, ".git2ftp")
 
 	ftpCli := &FTP{}
-	cli, err := ftp.Dial(*app.FTPUrl, ftp.DialWithTimeout(5*time.Second))
+	cli, err := ftp.Dial(
+		*app.FTPUrl,
+		ftp.DialWithTimeout(5*time.Second),
+		ftp.DialWithDisabledEPSV(true),
+	)
 	if err != nil {
 		exit(1, err, "cannot dial to ftp")
 	}
