@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"net/textproto"
 	"os"
 	"os/exec"
 	"path"
@@ -93,6 +94,9 @@ func main() {
 	if app.FromSHA == nil || *app.FromSHA == "" {
 		r, err := ftpCli.Retr(git2ftpFile)
 		if err != nil {
+			if errProto, ok := err.(*textproto.Error); ok && errProto.Code == ftp.StatusFileUnavailable {
+				exit(1, fmt.Errorf("file .git2ftp does not exist, you must specify --from-sha"))
+			}
 			exit(1, err, "cannot retrieve .git2ftp file")
 		}
 		content, err := ioutil.ReadAll(r)
@@ -169,13 +173,27 @@ func (file GitFileInfo) Apply(ftpCli *FTP) error {
 		// delete file from remote
 		return ftpCli.Delete(remoteFile)
 	case "M", "A":
-		log.Printf("STOR %s", remoteFile)
 		localFile, err := os.Open(path.Join(*app.GitDirectory, file.File))
 		if err != nil {
 			return err
 		}
 		defer localFile.Close()
-		return ftpCli.Stor(remoteFile, localFile)
+		err = ftpCli.Stor(remoteFile, localFile)
+		if err != nil {
+			if errProto, ok := err.(*textproto.Error); ok && errProto.Code == ftp.StatusBadFileName {
+				// directory does not exist
+				dir, _ := path.Split(remoteFile)
+				if errMkd := createDir(ftpCli, dir, false); errMkd != nil {
+					return errMkd
+				}
+				err = ftpCli.Stor(remoteFile, localFile)
+				if err == nil {
+					return nil
+				}
+			}
+			return err
+		}
+		return nil
 	}
 	return fmt.Errorf("unknown action: %s", file.Action)
 }
@@ -184,26 +202,113 @@ type FTP struct {
 	*ftp.ServerConn
 }
 
+func createDir(ftpCli *FTP, dir string, circuitBreaker bool) error {
+	dir = strings.TrimRight(dir, "/")
+	errMkd := ftpCli.MakeDir(dir)
+	if errMkd != nil {
+		if errMkdProto, ok := errMkd.(*textproto.Error); !circuitBreaker && ok && errMkdProto.Code == ftp.StatusFileUnavailable {
+			split := strings.Split(dir, "/")
+			if len(split) == 1 {
+				return fmt.Errorf("cannot create dir")
+			}
+			if errCreate := createDir(ftpCli, strings.Join(split[:len(split)-1], "/"), false); errCreate != nil {
+				return errCreate
+			}
+			return createDir(ftpCli, dir, true) // circuit breaker
+		}
+		return errMkd
+	}
+	return nil
+}
+
 func (f *FTP) Stor(remoteFile string, r io.Reader) error {
-	log.Printf("STOR %s", remoteFile)
+	logString := fmt.Sprintf("STOR %s", remoteFile)
+	log.Println(logString)
 	if f.ServerConn == nil {
 		return nil
 	}
-	return f.ServerConn.Stor(remoteFile, r)
+	err := f.ServerConn.Stor(remoteFile, r)
+	if err != nil {
+		f.logError(logString, err)
+		return err
+	} else {
+		f.logSuccess(logString)
+	}
+	return nil
+}
+
+func (f *FTP) logError(str string, err error) {
+	if errP, ok := err.(*textproto.Error); ok {
+		log.Printf("%s: %d\n", str, errP.Code)
+	} else {
+		log.Printf("%s: %s\n", str, err)
+	}
+}
+
+func (f *FTP) logSuccess(str string) {
+	log.Printf("%s: 200\n", str)
 }
 
 func (f *FTP) Retr(remoteFile string) (io.Reader, error) {
-	log.Printf("RETR %s", remoteFile)
+	logString := fmt.Sprintf("STOR %s", remoteFile)
+	log.Println(logString)
 	if f.ServerConn == nil {
 		return bytes.NewBufferString(""), nil
 	}
-	return f.ServerConn.Retr(remoteFile)
+	r, err := f.ServerConn.Retr(remoteFile)
+	if err != nil {
+		f.logError(logString, err)
+		return nil, err
+	} else {
+		f.logSuccess(logString)
+	}
+	return r, nil
 }
 
 func (f *FTP) Delete(remoteFile string) error {
-	log.Printf("DEL %s", remoteFile)
+	logString := fmt.Sprintf("DEL %s", remoteFile)
+	log.Println(logString)
 	if f.ServerConn == nil {
 		return nil
 	}
-	return f.ServerConn.Delete(remoteFile)
+	err := f.ServerConn.Delete(remoteFile)
+	if err != nil {
+		f.logError(logString, err)
+		return err
+	} else {
+		f.logSuccess(logString)
+	}
+	return nil
+}
+
+func (f *FTP) MakeDir(path string) error {
+	logString := fmt.Sprintf("MKD %s", path)
+	log.Println(logString)
+	if f.ServerConn == nil {
+		return nil
+	}
+	err := f.ServerConn.MakeDir(path)
+	if err != nil {
+		f.logError(logString, err)
+		return err
+	} else {
+		f.logSuccess(logString)
+	}
+	return nil
+}
+
+func (f *FTP) List(path string) ([]*ftp.Entry, error) {
+	logString := fmt.Sprintf("LIST %s", path)
+	log.Println(logString)
+	if f.ServerConn == nil {
+		return []*ftp.Entry{}, nil
+	}
+	lst, err := f.ServerConn.List(path)
+	if err != nil {
+		f.logError(logString, err)
+		return nil, err
+	} else {
+		f.logSuccess(logString)
+	}
+	return lst, nil
 }
