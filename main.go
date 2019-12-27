@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alecthomas/kingpin"
@@ -62,6 +63,7 @@ var (
 		FTPUser:         appPtr.Flag("ftp-user", "User to log on the FTP").String(),
 		FTPPassword:     appPtr.Flag("ftp-password", "Password for the user to log on the FTP").String(),
 	}
+	ftpCli = &FTP{}
 )
 
 func main() {
@@ -74,26 +76,27 @@ func main() {
 	git2ftpFile := path.Join(*app.RemoteDirectory, ".git2ftp")
 
 	ftpCli := &FTP{}
-	cli, err := ftp.Dial(
-		*app.FTPUrl,
-		ftp.DialWithTimeout(5*time.Second),
-		ftp.DialWithDisabledEPSV(true),
-	)
-	if err != nil {
-		exit(1, err, "cannot dial to ftp")
-	}
 	defer func() {
-		if err := cli.Quit(); err != nil {
+		if err := ftpCli.Quit(); err != nil {
 			exit(1, err, "cannot logout from ftp")
 		}
 	}()
-	if app.FTPUser != nil {
-		err = cli.Login(*app.FTPUser, *app.FTPPassword)
-		if err != nil {
-			exit(1, err, "cannot login to ftp")
-		}
+	err := ftpCli.Init()
+	if err != nil {
+		exit(1, err, "cannot connect to ftp")
 	}
-	ftpCli.ServerConn = cli
+	go func() {
+		// keep conn alive
+		ticker := time.NewTicker(1 * time.Second)
+		for {
+			select {
+			case <-ticker.C:
+				if err := ftpCli.NoOp(); err != nil {
+					log.Printf("NO OP: %s\n", err)
+				}
+			}
+		}
+	}()
 
 	if app.FromSHA == nil || *app.FromSHA == "" {
 		r, err := ftpCli.Retr(git2ftpFile)
@@ -204,6 +207,7 @@ func (file GitFileInfo) Apply(ftpCli *FTP) error {
 
 type FTP struct {
 	*ftp.ServerConn
+	sync.Mutex
 }
 
 func createDir(ftpCli *FTP, dir string, circuitBreaker bool) error {
@@ -226,6 +230,9 @@ func createDir(ftpCli *FTP, dir string, circuitBreaker bool) error {
 }
 
 func (f *FTP) Stor(remoteFile string, r io.Reader) error {
+	f.Lock()
+	defer f.Unlock()
+
 	logString := fmt.Sprintf("STOR %s", remoteFile)
 	log.Println(logString)
 	if f.ServerConn == nil {
@@ -254,6 +261,9 @@ func (f *FTP) logSuccess(str string) {
 }
 
 func (f *FTP) Retr(remoteFile string) (io.Reader, error) {
+	f.Lock()
+	defer f.Unlock()
+
 	logString := fmt.Sprintf("STOR %s", remoteFile)
 	log.Println(logString)
 	if f.ServerConn == nil {
@@ -270,6 +280,9 @@ func (f *FTP) Retr(remoteFile string) (io.Reader, error) {
 }
 
 func (f *FTP) Delete(remoteFile string) error {
+	f.Lock()
+	defer f.Unlock()
+
 	logString := fmt.Sprintf("DEL %s", remoteFile)
 	log.Println(logString)
 	if f.ServerConn == nil {
@@ -286,6 +299,9 @@ func (f *FTP) Delete(remoteFile string) error {
 }
 
 func (f *FTP) MakeDir(path string) error {
+	f.Lock()
+	defer f.Unlock()
+
 	logString := fmt.Sprintf("MKD %s", path)
 	log.Println(logString)
 	if f.ServerConn == nil {
@@ -302,6 +318,9 @@ func (f *FTP) MakeDir(path string) error {
 }
 
 func (f *FTP) List(path string) ([]*ftp.Entry, error) {
+	f.Lock()
+	defer f.Unlock()
+
 	logString := fmt.Sprintf("LIST %s", path)
 	log.Println(logString)
 	if f.ServerConn == nil {
@@ -315,4 +334,51 @@ func (f *FTP) List(path string) ([]*ftp.Entry, error) {
 		f.logSuccess(logString)
 	}
 	return lst, nil
+}
+
+func (f *FTP) Init() error {
+	if f.ServerConn != nil {
+		err := f.Quit()
+		if err != nil {
+			log.Printf("cannot quit: %s\n", err)
+		}
+		f.ServerConn = nil
+	}
+	cli, err := ftp.Dial(
+		*app.FTPUrl,
+		ftp.DialWithTimeout(5*time.Second),
+		ftp.DialWithDisabledEPSV(true),
+	)
+	if err != nil {
+		return err
+	}
+	if app.FTPUser != nil {
+		err = cli.Login(*app.FTPUser, *app.FTPPassword)
+		if err != nil {
+			return err
+		}
+	}
+	f.ServerConn = cli
+	return nil
+}
+
+func (f *FTP) Quit() error {
+	f.Lock()
+	defer f.Unlock()
+
+	if f.ServerConn == nil {
+		return nil
+	}
+	return f.ServerConn.Quit()
+}
+
+func (f *FTP) NoOp() error {
+	f.Lock()
+	defer f.Unlock()
+
+	if f.ServerConn == nil {
+		return nil
+	}
+	log.Printf("NOOP\n")
+	return f.ServerConn.NoOp()
 }
