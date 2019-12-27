@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/alecthomas/kingpin"
 	"github.com/jlaffaye/ftp"
@@ -71,7 +73,7 @@ func main() {
 	git2ftpFile := path.Join(*app.RemoteDirectory, ".git2ftp")
 
 	ftpCli := &FTP{}
-	/*cli, err := ftp.Dial(*app.FTPUrl, ftp.DialWithTimeout(5*time.Second))
+	cli, err := ftp.Dial(*app.FTPUrl, ftp.DialWithTimeout(5*time.Second))
 	if err != nil {
 		exit(1, err, "cannot dial to ftp")
 	}
@@ -87,8 +89,8 @@ func main() {
 		}
 	}
 	ftpCli.ServerConn = cli
-	*/
-	if app.FromSHA == nil {
+
+	if app.FromSHA == nil || *app.FromSHA == "" {
 		r, err := ftpCli.Retr(git2ftpFile)
 		if err != nil {
 			exit(1, err, "cannot retrieve .git2ftp file")
@@ -101,6 +103,7 @@ func main() {
 		app.FromSHA = &strContent
 	}
 
+	log.Printf("Running git diff --name-status %s %s", *app.FromSHA, *app.ToSHA)
 	cmd := exec.Command("git", "diff", "--name-status", *app.FromSHA, *app.ToSHA)
 	cmd.Dir = *app.GitDirectory
 	stdout, err := cmd.StdoutPipe()
@@ -116,18 +119,19 @@ func main() {
 		exit(1, err, "cannot start git diff command")
 	}
 	changedFiles := make([]GitFileInfo, 0)
-	for {
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
 		var info GitFileInfo
-		n, err := fmt.Fscanf(stdout, "%s	%s", &info.Action, &info.File)
-		if err != nil && err != io.EOF {
-			panic(err)
-		} else if n == 0 || err == io.EOF {
-			break
-		}
+		txt := scanner.Text()
+		info.Action = txt[0:1]
+		info.File = strings.TrimSpace(txt[1:])
 		if !strings.HasPrefix(info.File, *app.SyncDirectory) {
 			continue
 		}
 		changedFiles = append(changedFiles, info)
+	}
+	if err := scanner.Err(); err != nil {
+		exit(1, err)
 	}
 	outputErr, errRead := ioutil.ReadAll(stderr)
 	if errRead != nil {
